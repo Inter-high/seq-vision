@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 실험에 사용할 모델 이름 배열
-models=("CNNClassifier" "RNNClassifier" "CNNRNNClassifier" "LSTMClassifier" "CNNLSTMClassifier")
+models=("CNNClassifier" "CNNRNNClassifier" "CNNLSTMClassifier")
 
 # config 파일 경로 (필요시 수정)
 config_file="./conf/config.yaml"
