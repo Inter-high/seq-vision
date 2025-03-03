@@ -1,0 +1,22 @@
+seed: 42
+data:
+  data_dir: "UCF101"
+  resize: 224
+  max_frame: 100
+  max_samples_per_class: 10
+  batch_size: 4
+  num_workers: 8
+model:
+  model_name: "CNNClassifier"
+  hidden_size: 256
+  num_classes: 101
+train:
+  lr: 1e-3
+  epochs: 100
+  milestones: [10, 80]
+  gamma: 0.1
+  patience: 4
+email:
+  to: "yumemonzo@gmail.com"
+  from: "yumemonzo@gmail.com"
+  password: "gbnl jjqb uetw oahk"
