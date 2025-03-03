@@ -7,12 +7,12 @@ Date: 2025-03-03
 """
 
 from models.resnet18 import CNNClassifier
-from models.rnn import RNNClassifier, CNNRNNClassifier
-from models.lstm import LSTMClassifier, CNNLSTMClassifier
+from models.rnn import CNNRNNClassifier
+from models.lstm import CNNLSTMClassifier
 from torch import nn
 
 
-def get_classifier(cfg: dict, input_size: int) -> nn.Module:
+def get_classifier(cfg: dict) -> nn.Module:
     """
     Retrieve a classifier model based on the configuration.
 
@@ -26,18 +26,12 @@ def get_classifier(cfg: dict, input_size: int) -> nn.Module:
     # Select CNNClassifier if specified in the configuration.
     if cfg['model_name'] == 'CNNClassifier':
         model = CNNClassifier(cfg['num_classes'])
-    # Select RNNClassifier for sequence modeling using an RNN.
-    elif cfg['model_name'] == 'RNNClassifier':
-        model = RNNClassifier(input_size, cfg['hidden_size'], cfg['num_classes'])
     # Select CNNRNNClassifier that combines CNN-based feature extraction with an RNN.
     elif cfg['model_name'] == 'CNNRNNClassifier':
-        model = CNNRNNClassifier(cfg['hidden_size'], cfg['num_classes'])
+        model = CNNRNNClassifier(cfg['hidden_size'], cfg['num_classes'], cfg['num_layers'])
     # Select LSTMClassifier for sequence modeling using an LSTM.
-    elif cfg['model_name'] == 'LSTMClassifier':
-        model = LSTMClassifier(input_size, cfg['hidden_size'], cfg['num_classes'])
-    # Select CNNLSTMClassifier that combines CNN-based feature extraction with an LSTM.
     elif cfg['model_name'] == 'CNNLSTMClassifier':
-        model = CNNLSTMClassifier(cfg['hidden_size'], cfg['num_classes'])
+        model = CNNLSTMClassifier(cfg['hidden_size'], cfg['num_classes'], cfg['num_layers'])
     else:
         raise ValueError(f"Unsupported model name: {cfg['model_name']}")
 
