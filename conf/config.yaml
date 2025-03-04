@@ -7,14 +7,14 @@ data:
   batch_size: 4
   num_workers: 8
 model:
-  model_name: "CNNLSTMClassifier"
+  model_name: "CNNClassifier"
   hidden_size: 256
   num_classes: 101
   num_layers: 4
 train:
   lr: 1e-3
-  epochs: 100
-  milestones: [10, 80]
+  epochs: 200
+  milestones: [20, 150, 180]
   gamma: 0.1
   patience: 4
 email:
