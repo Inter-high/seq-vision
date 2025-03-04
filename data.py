@@ -1,278 +1,149 @@
-"""
-This module contains a dataset class for the UCF101 video dataset along with helper functions 
-for data transformation, splitting, collating, and loading.
-
-Author: yumemonzo@gmail.com
-Date: 2025-03-03
-"""
-
 import os
-import random
-from typing import List, Tuple, Dict, Optional, Callable
-
 import cv2
+import numpy as np
+import random
 import torch
+from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
-from PIL import Image
-from torch.utils.data import Dataset, Subset, DataLoader
 
+# 1. 특정 폴더 내 .avi 파일 읽어오기
+def load_avi_files(folder):
+    files = [f for f in os.listdir(folder) if f.lower().endswith('.avi') and os.path.isfile(os.path.join(folder, f))]
+    return files
 
-class UCF101Dataset(Dataset):
-    """
-    Dataset class for handling the UCF101 video dataset.
+# 2. 파일명에서 1번째 "_"와 2번째 "_" 사이의 문자열 추출
+def extract_label_from_filename(filename):
+    basename = os.path.splitext(filename)[0]
+    first_us = basename.find('_')
+    if first_us == -1:
+        return None
+    second_us = basename.find('_', first_us + 1)
+    if second_us == -1:
+        return None
+    return basename[first_us+1:second_us]
+
+def group_files_by_label(folder, files):
+    class_to_files = {}
+    for file in files:
+        label_str = extract_label_from_filename(file)
+        if label_str is None:
+            print(f"파일 '{file}'에 올바른 '_' 구분자가 없습니다. 건너뜁니다.")
+            continue
+        path = os.path.join(folder, file)
+        class_to_files.setdefault(label_str, []).append(path)
+    return class_to_files
+
+def create_label_mapping(class_to_files):
+    unique_labels = sorted(class_to_files.keys())
+    if len(unique_labels) != 101:
+        print(f"경고: 고유 label의 개수가 101개가 아닙니다. (총 {len(unique_labels)}개)")
+    mapping = {label: idx for idx, label in enumerate(unique_labels)}
+    return mapping
+
+# 3. 각 클래스별로 num_samples 개의 영상을 선택하고, 각 영상에서 num_frame 프레임 추출 (부족 시 제로 패딩)
+def sample_videos_for_each_class(class_to_files, num_samples, num_frame):
+    class_to_videos = {}
+    for label, file_list in class_to_files.items():
+        if len(file_list) < num_samples:
+            print(f"클래스 '{label}'의 영상 수가 {num_samples}개 미만입니다 (총 {len(file_list)}개). 건너뜁니다.")
+            continue
+        # 무작위로 num_samples개 선택
+        selected_files = random.sample(file_list, num_samples) if len(file_list) > num_samples else file_list
+        videos = []
+        for video_path in selected_files:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                print(f"영상 '{video_path}' 열기 실패. 건너뜁니다.")
+                continue
+            frames = []
+            for _ in range(num_frame):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(frame)
+            cap.release()
+            if len(frames) == 0:
+                print(f"영상 '{video_path}'에서 프레임을 하나도 읽지 못했습니다.")
+                continue
+            # 부족한 경우 제로 패딩 (첫 프레임 기준)
+            if len(frames) < num_frame:
+                pad_frame = np.zeros_like(frames[0])
+                frames += [pad_frame] * (num_frame - len(frames))
+            if len(frames) > num_frame:
+                frames = frames[:num_frame]
+            videos.append(frames)
+        if len(videos) != num_samples:
+            print(f"클래스 '{label}'의 {num_samples}개 샘플을 모으지 못했습니다. (모은 샘플 수: {len(videos)})")
+            continue
+        class_to_videos[label] = videos
+    return class_to_videos
+
+# 4. 각 클래스별로 선택된 영상들을 ratio에 따라 train, valid, test로 분할
+def split_videos(class_to_videos, ratio=(6,2,2)):
+    train_list, valid_list, test_list = [], [], []
+    total_ratio = sum(ratio)
+    for label, videos in class_to_videos.items():
+        # 총 영상 수 = num_samples
+        n = len(videos)
+        n_train = int(n * ratio[0] / total_ratio)
+        n_valid = int(n * ratio[1] / total_ratio)
+        # 나머지를 test에 할당
+        n_test = n - n_train - n_valid
+        # 만약 n_train or n_valid or n_test가 0이면 최소 1개씩 할당하도록 조정 (필요시)
+        if n_train < 1:
+            n_train = 1
+        if n_valid < 1:
+            n_valid = 1
+        if n_test < 1:
+            n_test = 1
+        # 영상 순서를 무작위 섞은 후 분할
+        random.shuffle(videos)
+        train_videos = videos[:n_train]
+        valid_videos = videos[n_train:n_train+n_valid]
+        test_videos = videos[n_train+n_valid:n_train+n_valid+n_test]
+        for video in train_videos:
+            train_list.append((label, video))
+        for video in valid_videos:
+            valid_list.append((label, video))
+        for video in test_videos:
+            test_list.append((label, video))
+    return train_list, valid_list, test_list
+
+# 5. Dataset 만들기 (transform: ToPILImage, Resize, ToTensor)
+def get_video_transform(single_transform):
+    def video_transform(video_tensor):
+        # video_tensor: (num_frame, C, H, W) – 각 프레임에 대해 변환 적용 후 stack
+        transformed = [single_transform(frame) for frame in video_tensor]
+        return torch.stack(transformed)
+    return video_transform
+
+class VideoDataset(Dataset):
+    def __init__(self, video_list, label2idx, transform=None):
+        """
+        video_list: 각 항목이 (label_str, video) 형태, video는 num_frame개의 프레임 리스트 (numpy arrays)
+        label2idx: label mapping (문자열 -> int)
+        transform: 영상에 적용할 transform (default: get_video_transform)
+        """
+        self.video_list = video_list
+        self.label2idx = label2idx
+        self.transform = get_video_transform(transform)
     
-    This class loads .avi video files from a given directory, processes the video frames,
-    applies optional transformations, and provides video samples along with their class labels.
-    """
-    def __init__(self, data_dir: str, transform: Optional[Callable] = None, max_samples_per_class: Optional[int] = None) -> None:
-        """
-        Initialize the dataset with the directory path and optional parameters.
-        
-        Parameters:
-            data_dir (str): Path to the directory containing video files.
-            transform (Optional[Callable]): Transformation to apply to each video frame.
-            max_samples_per_class (Optional[int]): Maximum number of samples to include per class.
-        """
-        self.data_dir: str = data_dir
-        self.transform: Optional[Callable] = transform
-        self.max_samples_per_class: Optional[int] = max_samples_per_class
-        self.samples, self.classes, self.class_to_idx = self._load_samples()
-
-    def _load_samples(self) -> Tuple[List[Tuple[str, int]], List[str], Dict[str, int]]:
-        """
-        Load and process video file paths and their corresponding class labels.
-        
-        Returns:
-            Tuple[List[Tuple[str, int]], List[str], Dict[str, int]]:
-                - A list of tuples where each tuple contains the video file path and the corresponding class index.
-                - A sorted list of class names.
-                - A dictionary mapping each class name to its index.
-        """
-        # Retrieve all .avi files from the specified directory
-        file_names: List[str] = [f for f in os.listdir(self.data_dir) if f.lower().endswith('.avi')]
-        
-        # Group files by class name extracted from the filename
-        samples_dict: Dict[str, List[str]] = {}
-        for file_name in file_names:
-            # Assumes filename format "xxx_classname_yyy.avi"
-            tokens: List[str] = file_name.split('_')
-            class_name: str = tokens[1] if len(tokens) > 1 else "Unknown"
-            samples_dict.setdefault(class_name, []).append(os.path.join(self.data_dir, file_name))
-        
-        # Sort class names and limit number of samples per class if specified
-        classes: List[str] = sorted(samples_dict.keys())
-        filtered_samples: List[Tuple[str, str]] = []
-        for cls in classes:
-            file_list: List[str] = samples_dict[cls]
-            if self.max_samples_per_class is not None:
-                file_list = file_list[:self.max_samples_per_class]
-            for file_path in file_list:
-                filtered_samples.append((file_path, cls))
-        
-        # Create a mapping from class names to indices and form the sample list
-        class_to_idx: Dict[str, int] = {cls: idx for idx, cls in enumerate(classes)}
-        samples: List[Tuple[str, int]] = [(file_path, class_to_idx[label]) for file_path, label in filtered_samples]
-        
-        return samples, classes, class_to_idx
-
-    def __len__(self) -> int:
-        """
-        Return the total number of video samples in the dataset.
-        
-        Returns:
-            int: Number of samples.
-        """
-        return len(self.samples)
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
-        """
-        Retrieve a video sample and its class label by index.
-        
-        Parameters:
-            idx (int): Index of the desired sample.
-        
-        Returns:
-            Tuple[torch.Tensor, int]:
-                - A tensor representing the video (stack of frames).
-                - The integer class label corresponding to the video.
-        """
-        file_path, label = self.samples[idx]
-        cap = cv2.VideoCapture(file_path)
-
-        frames: List[torch.Tensor] = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Convert frame from BGR to RGB and convert to a PIL image
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = Image.fromarray(frame)
-            if self.transform:
-                frame = self.transform(frame)
-
-            frames.append(frame)
-
-        cap.release()
-        video_tensor: torch.Tensor = torch.stack(frames)
-
+    def __len__(self):
+        return len(self.video_list)
+    
+    def __getitem__(self, idx):
+        label_str, video_frames = self.video_list[idx]
+        # 각 프레임: numpy array (H, W, C) -> torch tensor (C, H, W)
+        video_tensor = torch.stack([torch.from_numpy(frame).permute(2,0,1) for frame in video_frames])
+        # transform: 개별 프레임 변환 후 stack (변환된 video_tensor의 shape: (num_frame, C, new_H, new_W))
+        if self.transform:
+            video_tensor = self.transform(video_tensor)
+        label = torch.tensor(self.label2idx[label_str], dtype=torch.long)
         return video_tensor, label
-    
 
-def get_transform(resize: int) -> transforms.Compose:
-    """
-    Create a transformation pipeline for processing video frames.
-    
-    Parameters:
-        resize (int): The size to which each frame should be resized (height and width).
-    
-    Returns:
-        transforms.Compose: The composed transformation pipeline.
-    """
-    transform = transforms.Compose([
-        transforms.Resize((resize, resize)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-    return transform
-
-
-def get_dataset(data_dir: str, transform: transforms.Compose, max_samples_per_class: Optional[int] = None) -> UCF101Dataset:
-    """
-    Initialize the UCF101 dataset.
-    
-    Parameters:
-        data_dir (str): Path to the directory containing video files.
-        transform (transforms.Compose): Transformation pipeline to apply to video frames.
-        max_samples_per_class (Optional[int]): Maximum number of samples to include per class.
-    
-    Returns:
-        UCF101Dataset: An instance of the UCF101 dataset.
-    """
-    return UCF101Dataset(data_dir, transform, max_samples_per_class)
-
-
-def split_dataset(dataset: UCF101Dataset) -> Tuple[Subset, Subset, Subset]:
-    """
-    Split the dataset into training, validation, and test subsets.
-    
-    The split is done per class to ensure balanced distribution:
-      - 60% for training
-      - 20% for validation
-      - 20% for testing
-    
-    Parameters:
-        dataset (UCF101Dataset): The complete dataset to split.
-    
-    Returns:
-        Tuple[Subset, Subset, Subset]: The training, validation, and test subsets.
-    """
-    indices_by_class: Dict[int, List[int]] = {}
-    for idx, (_, label) in enumerate(dataset.samples):
-        indices_by_class.setdefault(label, []).append(idx)
-
-    train_indices: List[int] = []
-    valid_indices: List[int] = []
-    test_indices: List[int] = []
-
-    # Shuffle and split indices for each class
-    for indices in indices_by_class.values():
-        random.shuffle(indices)
-        n: int = len(indices)
-        n_train: int = int(n * 0.6)
-        n_valid: int = int(n * 0.2)
-        train_indices.extend(indices[:n_train])
-        valid_indices.extend(indices[n_train:n_train + n_valid])
-        test_indices.extend(indices[n_train + n_valid:])
-
-    return (
-        Subset(dataset, train_indices),
-        Subset(dataset, valid_indices),
-        Subset(dataset, test_indices)
-    )
-
-
-def fixed_length_collate_fn(batch: List[Tuple[torch.Tensor, int]], max_frame: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Custom collate function to ensure each video has a fixed number of frames.
-    
-    If a video has more frames than 'max_frame', it is truncated.
-    If it has fewer, it is padded with zeros.
-    
-    Parameters:
-        batch (List[Tuple[torch.Tensor, int]]): A list of tuples, each containing a video tensor and its label.
-        max_frame (int): The fixed number of frames each video should have.
-    
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]:
-            - A tensor containing the batch of videos, each with exactly 'max_frame' frames.
-            - A tensor of corresponding labels.
-    """
-    videos, labels = zip(*batch)
-
-    processed_videos: List[torch.Tensor] = []
-    for video in videos:
-        num_frames: int = video.size(0)
-        if num_frames >= max_frame:
-            # Truncate the video to 'max_frame' frames
-            video = video[:max_frame]
-        else:
-            # Pad the video with zeros to have 'max_frame' frames
-            pad_frames: int = max_frame - num_frames
-            pad_tensor = torch.zeros((pad_frames, *video.shape[1:]), dtype=video.dtype)
-            video = torch.cat([video, pad_tensor], dim=0)
-        processed_videos.append(video)
-    videos_tensor: torch.Tensor = torch.stack(processed_videos)
-    labels_tensor: torch.Tensor = torch.tensor(labels, dtype=torch.long)
-
-    return videos_tensor, labels_tensor
-
-
-def get_loaders(
-    train_dataset: Subset, 
-    valid_dataset: Subset, 
-    test_dataset: Subset, 
-    max_frame: int, 
-    batch_size: int, 
-    num_workers: int
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """
-    Create data loaders for training, validation, and testing datasets.
-    
-    Each loader uses a custom collate function to enforce a fixed number of frames per video.
-    
-    Parameters:
-        train_dataset (Subset): Subset for training.
-        valid_dataset (Subset): Subset for validation.
-        test_dataset (Subset): Subset for testing.
-        max_frame (int): Fixed number of frames for each video.
-        batch_size (int): Number of samples per batch.
-        num_workers (int): Number of worker processes for data loading.
-    
-    Returns:
-        Tuple[DataLoader, DataLoader, DataLoader]: Data loaders for training, validation, and testing.
-    """
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=lambda batch: fixed_length_collate_fn(batch, max_frame)
-    )
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=lambda batch: fixed_length_collate_fn(batch, max_frame)
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=lambda batch: fixed_length_collate_fn(batch, max_frame)
-    )
-
+# 6. DataLoader 생성
+def create_dataloaders(train_dataset, valid_dataset, test_dataset, batch_size=4, num_workers=0):
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
     return train_loader, valid_loader, test_loader

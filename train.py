@@ -19,7 +19,7 @@ import hydra
 from omegaconf import DictConfig
 
 # Import utility functions and modules for data handling and training.
-from data import get_transform, get_dataset, split_dataset, get_loaders
+from data import *
 from models import get_classifier
 from trainer import Trainer
 from utils import seed_everything, count_model_parameters, send_email, plot_compare_loss, plot_compare_acc
@@ -40,22 +40,92 @@ def my_app(cfg: DictConfig) -> None:
     # Set random seed for reproducibility.
     seed_everything(cfg['seed'])
 
-    # Create a transformation pipeline for video frames.
-    transform = get_transform(cfg['data']['resize'])
+    folder = "/workspace/seq-vision/UCF101"
+    num_samples = 4       # 각 클래스별 사용할 영상 수 (예: 4)
+    num_frame = 25       # 각 영상에서 추출할 프레임 수
+    split_ratio = (6,2,2) # 예: 4개의 영상이면 train:2, valid:1, test:1 (비율은 상대적으로 적용됨)
+    batch_size = 4
+    size = 128
+    num_workers = 0
 
-    # Load the dataset using the specified directory and transformation.
-    dataset = get_dataset(cfg['data']['data_dir'], transform, cfg['data']['max_samples_per_class'])
+     # 1. 파일 읽어오기
+    files = load_avi_files(folder)
+    # 2. 파일명에서 label 추출 및 그룹화
+    class_to_files = group_files_by_label(folder, files)
+    # 2-2. label mapping 생성 (101개 클래스)
+    label2idx = create_label_mapping(class_to_files)
+    # 3. 각 클래스별 num_samples 영상 선택 및 num_frame 프레임 추출
+    class_to_videos = sample_videos_for_each_class(class_to_files, num_samples, num_frame)
+    # 4. 각 클래스별로 영상들을 split_ratio에 따라 train/valid/test로 분할
+    train_list, valid_list, test_list = split_videos(class_to_videos, ratio=split_ratio)
+    print(f"Train samples: {len(train_list)}, Valid samples: {len(valid_list)}, Test samples: {len(test_list)}")
     
-    # Split the dataset into training, validation, and test subsets.
-    train_dataset, valid_dataset, test_dataset = split_dataset(dataset)
-    logger.info(f"Dataset | Train: {len(train_dataset)} | Valid: {len(valid_dataset)} | Test: {len(test_dataset)}")
+    # 5. Dataset 생성 (transform: ToPILImage, Resize((224,244)), ToTensor)
+    train_transform = transforms.Compose([
+        transforms.ToPILImage(),
+         # 1) Resize: 원본 크기가 너무 클 경우 미리 줄임
+        transforms.Resize((size, size)),
 
-    # Create data loaders for each subset.
-    train_loader, valid_loader, test_loader = get_loaders(
-        train_dataset, valid_dataset, test_dataset,
-        cfg['data']['max_frame'], cfg['data']['batch_size'], cfg['data']['num_workers']
-    )
-    logger.info(f"DataLoader | Train: {len(train_loader)} | Valid: {len(valid_loader)} | Test: {len(test_loader)}")
+        # 2) RandomResizedCrop: 일정 비율로 랜덤 크롭 (기본 0.8~1.0 범위)
+        transforms.RandomResizedCrop(size=size, scale=(0.8, 1.0)),
+
+        # 3) RandomHorizontalFlip: 좌우 뒤집기
+        transforms.RandomHorizontalFlip(p=0.5),
+
+        # 4) RandomVerticalFlip: 상하 뒤집기
+        transforms.RandomVerticalFlip(p=0.5),
+
+        # 5) ColorJitter: 밝기/대비/채도/색조 변환
+        transforms.ColorJitter(
+            brightness=0.2,   # 밝기
+            contrast=0.2,     # 대비
+            saturation=0.2,   # 채도
+            hue=0.1           # 색조
+        ),
+
+        # 6) RandomRotation: 임의 회전
+        transforms.RandomRotation(degrees=15),
+
+        # 7) ToTensor: [0,255] → [0,1] 범위의 Tensor로
+        transforms.ToTensor(),
+
+        # 8) Normalize: 평균과 표준편차로 정규화
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
+    test_transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((size, size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
+
+    train_dataset = VideoDataset(train_list, label2idx, transform=train_transform)
+    valid_dataset = VideoDataset(valid_list, label2idx, transform=test_transform)
+    test_dataset  = VideoDataset(test_list,  label2idx, transform=test_transform)
+    
+    # 6. DataLoader 생성
+    train_loader, valid_loader, test_loader = create_dataloaders(train_dataset, valid_dataset, test_dataset, batch_size, num_workers)
+    
+    # 예시: 각 DataLoader에서 몇 개의 배치 출력
+    print("Train Loader:")
+    for i, (videos, labels) in enumerate(train_loader):
+        print(f"Batch {i+1}: Videos shape: {videos.shape}, Labels shape: {labels.shape}")
+        if i == 4:
+            break
+
+    print("Valid Loader:")
+    for i, (videos, labels) in enumerate(valid_loader):
+        print(f"Batch {i+1}: Videos shape: {videos.shape}, Labels shape: {labels.shape}")
+        if i == 4:
+            break
+
+    print("Test Loader:")
+    for i, (videos, labels) in enumerate(test_loader):
+        print(f"Batch {i+1}: Videos shape: {videos.shape}, Labels shape: {labels.shape}")
+        if i == 4:
+            break
 
     # Select the device: use GPU if available, otherwise CPU.
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
