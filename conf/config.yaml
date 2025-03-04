@@ -2,8 +2,8 @@ seed: 42
 data:
   data_dir: "UCF101"
   resize: 224
-  max_frame: 100
-  max_samples_per_class: 10
+  max_frame: 50 # 50,000
+  max_samples_per_class: 10 # (5,10 각각 테스트)
   batch_size: 4
   num_workers: 8
 model:
@@ -11,7 +11,7 @@ model:
   hidden_size: 256
   num_classes: 101
   num_layers: 4
-train:
+train: 
   lr: 1e-3
   epochs: 200
   milestones: [20, 150, 180]
