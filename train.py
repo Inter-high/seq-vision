@@ -19,7 +19,7 @@ import hydra
 from omegaconf import DictConfig
 
 # Import utility functions and modules for data handling and training.
-from data import load_ucf101_samples, split_ucf101_samples, get_train_transform, get_test_transform, UCF101Dataset, get_loaders
+from data import get_transform, get_dataset, split_dataset, get_loaders
 from models import get_classifier
 from trainer import Trainer
 from utils import seed_everything, count_model_parameters, send_email, plot_compare_loss, plot_compare_acc
@@ -40,47 +40,22 @@ def my_app(cfg: DictConfig) -> None:
     # Set random seed for reproducibility.
     seed_everything(cfg['seed'])
 
-    samples, classes, class_to_idx = load_ucf101_samples(
-        data_dir=cfg['data']['data_dir'],
-        max_samples_per_class=cfg['data']['max_samples_per_class']
-    )
-    logger.info(f"Total samples loaded: {len(samples)} (Classes: {len(classes)})")
+    # Create a transformation pipeline for video frames.
+    transform = get_transform(cfg['data']['resize'])
 
-    # 2) 샘플 분할 (클래스별로 섞어서 60:20:20)
-    train_samples, valid_samples, test_samples = split_ucf101_samples(
-        samples,
-        split_ratio=(0.6, 0.2, 0.2)  # 원하는 비율로 조정
-    )
-    logger.info(
-        f"Split samples | Train: {len(train_samples)} | "
-        f"Valid: {len(valid_samples)} | Test: {len(test_samples)}"
-    )
+    # Load the dataset using the specified directory and transformation.
+    dataset = get_dataset(cfg['data']['data_dir'], transform, cfg['data']['max_samples_per_class'])
+    
+    # Split the dataset into training, validation, and test subsets.
+    train_dataset, valid_dataset, test_dataset = split_dataset(dataset)
+    logger.info(f"Dataset | Train: {len(train_dataset)} | Valid: {len(valid_dataset)} | Test: {len(test_dataset)}")
 
-    # 3) Transform 정의
-    train_transform = get_train_transform(cfg['data']['resize'])
-    test_transform = get_test_transform(cfg['data']['resize'])
-
-    # 4) 각각의 Dataset 생성 (여기서 transform 다르게)
-    train_dataset = UCF101Dataset(train_samples, transform=train_transform)
-    valid_dataset = UCF101Dataset(valid_samples, transform=test_transform)
-    test_dataset  = UCF101Dataset(test_samples,  transform=test_transform)
-
-    logger.info(
-        f"Dataset | Train: {len(train_dataset)} | "
-        f"Valid: {len(valid_dataset)} | Test: {len(test_dataset)}"
-    )
-
-    # 5) DataLoader 생성
+    # Create data loaders for each subset.
     train_loader, valid_loader, test_loader = get_loaders(
         train_dataset, valid_dataset, test_dataset,
-        max_frame=cfg['data']['max_frame'],
-        batch_size=cfg['data']['batch_size'],
-        num_workers=cfg['data']['num_workers']
+        cfg['data']['max_frame'], cfg['data']['batch_size'], cfg['data']['num_workers']
     )
-    logger.info(
-        f"DataLoader | Train: {len(train_loader)} | "
-        f"Valid: {len(valid_loader)} | Test: {len(test_loader)}"
-    )
+    logger.info(f"DataLoader | Train: {len(train_loader)} | Valid: {len(valid_loader)} | Test: {len(test_loader)}")
 
     # Select the device: use GPU if available, otherwise CPU.
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -91,7 +66,7 @@ def my_app(cfg: DictConfig) -> None:
     logger.info(f"Model| Name: {cfg['model']['model_name']} | Parameters: {count_model_parameters(model):3,}")
 
     # Set up the optimizer and learning rate scheduler.
-    optimizer = optim.Adam(model.parameters(), lr=cfg['train']['lr'])
+    optimizer = optim.SGD(model.parameters(), lr=cfg['train']['lr'])
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=cfg['train']['milestones'], gamma=cfg['train']['gamma']
     )
@@ -129,13 +104,6 @@ def my_app(cfg: DictConfig) -> None:
 
     loss_image = plot_compare_loss([train_losses, valid_losses], ["Train Loss", "Valid Loss"], os.path.join(output_dir, f"loss.jpg"))
     acc_image = plot_compare_acc([train_accs, valid_accs], ["Train Acc", "Valid Acc"], os.path.join(output_dir, f"acc.jpg"))
-
-    # Prepare email notification details.
-    subject: str = "Training Completed"
-    body: str = (
-        f"Training job has completed successfully.\n"
-        f"Final top1_error: {top1_error:.4f} | top5_error: {top5_error:.4f}"
-    )
 
     import smtplib
     from email.mime.multipart import MIMEMultipart
