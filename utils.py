@@ -6,6 +6,7 @@ Author: yumemonzo@gmail.com
 Date: 2025-02-24
 """
 
+import io
 import random
 import torch
 import matplotlib.pyplot as plt
@@ -70,7 +71,14 @@ def plot_compare_loss(data: List[List[float]], labels: List[str], save_path: str
     plt.legend()
     plt.grid(True)
     plt.savefig(save_path)
-    plt.clf()
+
+    # Save the plot to a BytesIO object
+    buf = io.BytesIO()
+    plt.savefig(buf, format='jpg')
+    plt.close()
+    buf.seek(0)
+    
+    return buf.getvalue()
 
 
 def plot_compare_acc(data: List[List[float]], labels: List[str], save_path: str, title: str = 'Accuracy Comparison') -> None:
@@ -99,8 +107,14 @@ def plot_compare_acc(data: List[List[float]], labels: List[str], save_path: str,
     plt.legend()
     plt.grid(True)
     plt.savefig(save_path)
-    plt.clf()
-
+    
+    # Save the plot to a BytesIO object
+    buf = io.BytesIO()
+    plt.savefig(buf, format='jpg')
+    plt.close()
+    buf.seek(0)
+    
+    return buf.getvalue()
 
 def plot_compare_error(errors: List[float], labels: List[str], save_path: str, title: str = 'Error Comparison') -> None:
     """
