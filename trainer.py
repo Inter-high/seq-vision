@@ -213,7 +213,7 @@ class Trainer:
             loss_dict = {"train": train_loss}
             acc_dict = {"train": train_acc}
 
-            if epoch % 3 == 0:
+            if epoch % 5 == 0:
                 valid_loss, valid_acc = self.valid(valid_loader, flatten)
                 valid_losses.append(valid_loss)
                 valid_accs.append(valid_acc)
